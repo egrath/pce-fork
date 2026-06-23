@@ -53,6 +53,12 @@ int trm_is_valid (const char *str)
 	}
 #endif
 
+#ifdef PCE_ENABLE_SDL3
+	if (strcmp (str,"sdl3") == 0) {
+		return (1);
+	}
+#endif
+
 	return (0);
 }
 
@@ -139,6 +145,17 @@ terminal_t *ini_get_terminal (ini_sct_t *ini, const char *def)
 		}
 #else
 		pce_log (MSG_ERR, "*** terminal driver 'sdl' not supported\n");
+#endif
+	}
+	else if (strcmp (driver,"sdl3") == 0) {
+#ifdef PCE_ENABLE_SDL3
+		trm = sdl3_new (sct);
+		
+		if (trm == NULL) {
+			pce_log (MSG_ERR, "*** setting up sdl3 terminal failed\n");
+		}
+#else
+		pce_log (MSG_ERR, "*** terminal driver 'sdl3' not supported\n");
 #endif
 	}
 	else if (strcmp (driver, "null") == 0) {

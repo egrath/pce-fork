@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# cleans up the source tree by removing all build artifacts
+
+MYDIR=$(dirname $(readlink -f $0))
+pushd ${MYDIR} 2>/dev/null 1>&2
+
+# remove all object files
+find . -name \*.o -exec rm {} \;
+

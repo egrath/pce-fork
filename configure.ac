@@ -82,6 +82,7 @@ PCE_HOST_LINUX=0
 PCE_HOST_WINDOWS=0
 PCE_HOST_SUNOS=0
 PCE_HOST_NETBSD=0
+PCE_HOST_HAIKU=0
 case "$host_os" in
 [[Ll]]inux*)
 	PCE_HOST_LINUX=1
@@ -111,6 +112,7 @@ AC_SUBST(PCE_HOST_LINUX)
 AC_SUBST(PCE_HOST_WINDOWS)
 AC_SUBST(PCE_HOST_SUNOS)
 AC_SUBST(PCE_HOST_NETBSD)
+AC_SUBST(PCE_HOST_HAIKU)
 
 AC_MSG_CHECKING([host cpu])
 PCE_HOST_IA32=0
@@ -251,6 +253,7 @@ AC_SUBST(PCE_X11_LIBS)
 PCE_ENABLE_SDL=0
 PCE_ENABLE_SDL1=0
 PCE_ENABLE_SDL2=0
+PCE_ENABLE_SDL3=0
 AC_MSG_CHECKING([for SDL])
 AC_ARG_WITH(sdl,
   [AS_HELP_STRING([--with-sdl], [Build the SDL terminal [detected]])],
@@ -269,10 +272,19 @@ AC_ARG_WITH(sdl,
 		PCE_ENABLE_SDL2=1
 		AC_MSG_RESULT([2 (forced)])
 		;;
+	"3")
+		PCE_ENABLE_SDL=1
+		PCE_ENABLE_SDL3=1
+		AC_MSG_RESULT([3 (forced)])
+		;;
 	esac
   ],
   [
-	if sdl2-config --version > /dev/null 2>&1 ; then
+	if pkg-config --exists sdl3 > /dev/null 2>&1; then
+		PCE_ENABLE_SDL=1
+		PCE_ENABLE_SDL3=1
+		AC_MSG_RESULT([3 (detected)])
+	elif sdl2-config --version > /dev/null 2>&1 ; then
 		PCE_ENABLE_SDL=1
 		PCE_ENABLE_SDL2=1
 		AC_MSG_RESULT([2 (detected)])
@@ -285,7 +297,7 @@ AC_ARG_WITH(sdl,
 	fi
   ]
 )
-if test "x$PCE_ENABLE_SDL1" != "x0" ; then
+if test "x$PCE_ENABLE_SDL1" != "x0" ; then 
 	PCE_SDL_CFLAGS=`sdl-config --cflags`
 	PCE_SDL_LIBS=`sdl-config --libs`
 	AC_DEFINE(PCE_ENABLE_SDL)
@@ -295,10 +307,16 @@ elif test "x$PCE_ENABLE_SDL2" != "x0" ; then
 	PCE_SDL_LIBS=`sdl2-config --libs`
 	AC_DEFINE(PCE_ENABLE_SDL)
 	AC_DEFINE(PCE_ENABLE_SDL2)
+elif test "x$PCE_ENABLE_SDL3" != "x0" ; then
+	PCE_SDL_CFLAGS="`pkg-config --cflags sdl3`"
+	PCE_SDL_LIBS=`pkg-config --libs sdl3`
+	AC_DEFINE(PCE_ENABLE_SDL)
+	AC_DEFINE(PCE_ENABLE_SDL3)
 fi
 AC_SUBST(PCE_ENABLE_SDL)
 AC_SUBST(PCE_ENABLE_SDL1)
 AC_SUBST(PCE_ENABLE_SDL2)
+AC_SUBST(PCE_ENABLE_SDL3)
 AC_SUBST(PCE_SDL_CFLAGS)
 AC_SUBST(PCE_SDL_LIBS)
 
@@ -1053,6 +1071,12 @@ else
 	term2="$term2 sdl2"
 fi
 
+if test "x$PCE_ENABLE_SDL3" = "x1" ; then
+	term1="$term1 sdl3"
+else
+	term2="$term2 sdl3"
+fi
+
 
 char1=" null stdio"
 char2=""
@@ -1109,12 +1133,17 @@ else
 	sound2="$sound2 oss"
 fi
 
-if test "x$PCE_ENABLE_SDL" = "x1" ; then
+if [ test "x$PCE_ENABLE_SDL1" = "x1" ] || [ test "x$PCE_ENABLE_SDL2" = "x1" ]; then
 	sound1="$sound1 sdl"
 else
 	sound2="$sound2 sdl"
 fi
 
+if test "x$PCE_ENABLE_SDL3" = "x1" ; then
+	sound1="$sound1 sdl3"
+else
+	sound2="$sound2 sdl3"
+fi
 
 option1=""
 option2=""
