@@ -1,0 +1,15 @@
+MINIX 1.1
+---------
+
+The boot procedure using the original floppy disk images is as follows:
+
+1. Boot with the boot disk in drive 0.
+2. When prompted, insert the root disk in drive 0. Press '='.
+3. When prompted, insert the /usr disk in drive 0. Press return.
+
+The boot disk in images/boot-hd1.psi is modified to mount the root file
+system from /dev/hd1 and not load a RAM disk at all. Using this boot disk
+MINIX can be booted without swapping floppy disks.
+
+The default setup has images/boot-hd1.psi copied to fd0.psi, so no disk
+swap is required before pressing '='.

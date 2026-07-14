@@ -1,0 +1,16 @@
+COHERENT 2.3.43
+===============
+
+Disable autoboot:
+	# rm /autoboot
+
+Enable autoboot:
+	# ln /coherent /autoboot
+
+Enter multiuser mode:
+	press <ctrl>-D
+
+Partitions:
+	hd0	0/0/1	0/0/1		0	1
+	hd1	0/0/2	239/3/17	1	16319
+	hd2	240/0/1	304/3/17	16320	4352
