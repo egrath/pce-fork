@@ -177,9 +177,14 @@ static
 void sdl3_print_info (sdl3_t *sdl)
 {
 	int i;
+#if SDL_VERSION_ATLEAST(3,4,0)
+	SDL_GPUDevice *gpuDevice;
+	SDL_GPUTextureFormat format;
+#endif
 
+	/* print general information about the video and 
+	   render drivers available on the system */
 	fprintf (stdout,"sdl3: drivers available\n");
-
 	fprintf (stdout,"sdl3: SDL_VIDEODRIVER:\n");
 	for (i=0;i<SDL_GetNumVideoDrivers();i++)
 		fprintf (stdout,"sdl3:     %s\n",SDL_GetVideoDriver(i));
@@ -187,6 +192,20 @@ void sdl3_print_info (sdl3_t *sdl)
 	fprintf (stdout,"sdl3: SDL_RENDER_DRIVER:\n");
 	for (i=0;i<SDL_GetNumRenderDrivers();i++)
 		fprintf (stdout,"sdl3:     %s %s\n",SDL_GetRenderDriver(i),strcmp(SDL_GetRendererName(sdl->render),SDL_GetRenderDriver(i))==0 ? "(CURRENT)" : "" );
+
+#if SDL_VERSION_ATLEAST(3,4,0)
+	/* check if our gpu/renderer supports the RGB24 texture format */
+	if ((gpuDevice = SDL_GetGPURendererDevice (sdl->render)) == NULL) {
+		fprintf (stdout,"sdl3: WARNING, not using a GPU accelerated renderer (%s)\n", SDL_GetError());
+	} else {
+		format = SDL_GetGPUTextureFormatFromPixelFormat (SDL_PIXELFORMAT_RGB24);
+		if (SDL_GPUTextureSupportsFormat (gpuDevice, format, SDL_GPU_TEXTURETYPE_2D, 0) == 0) {
+			fprintf (stdout, "sdl3: WARNING, GPU does not support the RGB24 texture, may be slower!\n");
+		} else {
+			fprintf (stdout, "sdl3: RGB24 texture is hardware-accelerated\n");
+		}
+	}
+#endif
 }
 
 static
@@ -368,22 +387,41 @@ int sdl3_set_frame_size (sdl3_t *sdl)
 		return (0);
 	}
 
-	if (sdl->texture != NULL) {
-		SDL_DestroyTexture (sdl->texture);
-		sdl->texture = NULL;
+	if (sdl->texture[0] != NULL) {
+		SDL_DestroyTexture (sdl->texture[0]);
+		sdl->texture[0] = NULL;
 	}
 
-	sdl->texture = SDL_CreateTexture (sdl->render,
+	if (sdl->texture[1] != NULL) {
+		SDL_DestroyTexture (sdl->texture[1]);
+		sdl->texture[1] = NULL;
+	}
+
+	/* create the two textures we need for double buffering our output. We do
+	   this to not stall the rendering pipeline with our fast updates */
+	sdl->texture_index = 0;
+	sdl->texture[0] = SDL_CreateTexture (sdl->render,
 		SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING,
 		terminal_width,
 		terminal_height
 	);
-	if (sdl->texture == NULL) {
+	sdl->texture[1] = SDL_CreateTexture (sdl->render,
+		SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING,
+		terminal_width,
+		terminal_height
+	);
+	if (sdl->texture[0] == NULL || sdl->texture[1] == NULL) {
 		fprintf (stderr, "sdl3: SDL_CreateTexture failed (%s)\n",SDL_GetError());
 		return (1);
 	}
 
-	if (SDL_SetTextureScaleMode(sdl->texture,sdl->framebuffer_scale_mode) == 0) {
+	/* set the scaling mode for the textures according to what the user has 
+	   specified in the configuration file */
+	if (SDL_SetTextureScaleMode(sdl->texture[0],sdl->framebuffer_scale_mode) == 0) {
+		fprintf (stderr,"sdl3: SDL_SetTextureScaleMode failed (%s)\n",SDL_GetError());
+	}
+
+	if (SDL_SetTextureScaleMode(sdl->texture[1],sdl->framebuffer_scale_mode) == 0) {
 		fprintf (stderr,"sdl3: SDL_SetTextureScaleMode failed (%s)\n",SDL_GetError());
 	}
 
@@ -411,8 +449,10 @@ static
 void sdl3_update(sdl3_t *sdl)
 {
 	terminal_t *trm;
-	void       *pixels;
-	int        pitch;
+	void       *texturePixels;
+	void       *framebufferPixels;
+	int        texturePitch;
+	unsigned   framebufferLine;
 	SDL_FRect  dest_rect;
 
 	trm = &sdl->trm;
@@ -432,41 +472,53 @@ void sdl3_update(sdl3_t *sdl)
 		return;
 	}
 
-	if ((sdl->texture == NULL) || (sdl->render == NULL)) {
+	if ((sdl->texture[0] == NULL) || (sdl->texture[1] == NULL) || (sdl->render == NULL)) {
 		return;
 	}
 
 	/* update the destination rectangle we have to render to */
 	sdl3_update_framebuffer_render_rect (sdl);
 
-	/*
-	This is the SDL2 method for copying the pixels to our texture. However,
-	SDL_UpdateTexture is slightly faster at average
+	/* copy the pixels from our emulated buffer to the texture (one of two)
+	   for displaying.
 
-	SDL_LockTexture (sdl->texture, NULL, &pixels, &pitch);
-	memcpy (pixels, trm->buf, 3UL * trm->w * trm->h);
-	SDL_UnlockTexture (sdl->texture);
-	*/
-	if (SDL_UpdateTexture(sdl->texture,NULL,trm->buf,trm->w * 3UL) == 0) {
-		fprintf (stderr, "sdl3: SDL_UpdateTexture failed (%s)\n",SDL_GetError());
+		Formerly we used the approach of simply updating the texture
+		with SDL's "SDL_UpdateTexture" function, but it seems that some
+		graphics drivers - especially on Windows - do not perform very
+		well with this approach as we use a RGB24 texture. */
+	if (SDL_LockTexture (sdl->texture[sdl->texture_index], NULL, &texturePixels, &texturePitch) == 0) {
+		fprintf (stderr, "sdl3: SDL_LockTexture failed (%s)\n", SDL_GetError());
+		return;
 	}
 
-	/* Clear the renderer with black */
-	if (SDL_SetRenderDrawColor (sdl->render,0,0,0,255)==0) {
-		fprintf (stderr,"sdl3: SDL_SetRenderDrawColor failed (%s)\n",SDL_GetError());
+	framebufferPixels = (void *) trm->buf;
+	for (framebufferLine = 0; framebufferLine < trm->h; framebufferLine ++) {
+		memcpy (texturePixels, framebufferPixels, trm->w * 3);
+		framebufferPixels += trm->w * 3;
+		texturePixels += texturePitch;
 	}
 
+	SDL_UnlockTexture (sdl->texture[sdl->texture_index]);
+
+	/* Clear the renderer with black color (needed for the letterbox)*/
 	if (SDL_RenderClear (sdl->render)==0) {
-		fprintf (stderr,"sdl3: SDL_RenderClear failed (%s)\n",SDL_GetError());
+		fprintf (stderr,"sdl3: SDL_RenderClear failed (%s)\n", SDL_GetError());
+		return;
 	}
+
 	/* Render the texture with correct aspect ratio */
-	if (SDL_RenderTexture (sdl->render, sdl->texture, NULL, &(sdl->framebuffer_render_rect))==0) {
-		fprintf (stderr,"sdl3: SDL_RenderTexture failed (%s)\n",SDL_GetError());
+	if (SDL_RenderTexture (sdl->render, sdl->texture[sdl->texture_index], NULL, &(sdl->framebuffer_render_rect))==0) {
+		fprintf (stderr,"sdl3: SDL_RenderTexture failed (%s)\n", SDL_GetError());
+		return;
 	}
 
 	if (SDL_RenderPresent (sdl->render)==0) {
-		fprintf (stderr,"sdl3: SDL_RenderPresent failed (%s)\n",SDL_GetError());
+		fprintf (stderr,"sdl3: SDL_RenderPresent failed (%s)\n", SDL_GetError());
+		return;
 	}
+
+	/* toggle texture_index between 0 and 1 and vica versa */
+	sdl->texture_index ^= 1;
 }
 
 static
@@ -787,6 +839,7 @@ int sdl3_open (sdl3_t *sdl, unsigned w, unsigned h)
 	unsigned x, y;
 	unsigned fx, fy;
 	unsigned flags;
+	unsigned char *renderDriver = NULL;
 
 	trm_get_scale (&sdl->trm, w, h, &fx, &fy);
 
@@ -806,7 +859,9 @@ int sdl3_open (sdl3_t *sdl, unsigned w, unsigned h)
 
 	sdl->window = NULL;
 	sdl->render = NULL;
-	sdl->texture = NULL;
+	sdl->texture[0] = NULL;
+	sdl->texture[1] = NULL;
+	sdl->texture_index = 0;
 
 	/* create the window */
 	flags = SDL_WINDOW_RESIZABLE;
@@ -837,20 +892,36 @@ int sdl3_open (sdl3_t *sdl, unsigned w, unsigned h)
 	sdl->wdw_w = w;
 	sdl->wdw_h = h;
 
-	/* create the renderer */
+	/* Create the renderer */
+#if SDL_VERSION_ATLEAST(3,4,0)
+	sdl->render = SDL_CreateGPURenderer (NULL, sdl->window);
+	if (sdl->render == NULL) {
+		fprintf (stderr, "sdl3: SDL_CreateGPURenderer failed (%s)\n",SDL_GetError());
+		return (1);
+	}
+#else
 	sdl->render = SDL_CreateRenderer (sdl->window, NULL);
 	if (sdl->render == NULL) {
 		fprintf (stderr, "sdl3: SDL_CreateRenderer failed (%s)\n",SDL_GetError());
 		return (1);
 	}
+#endif
 
+	/* set the drawing color for the renderer - this is later used in sdl3_update
+	   to draw the screen's letterbox with black */
+	if (SDL_SetRenderDrawColor (sdl->render,0,0,0,255)==0) {
+		fprintf (stderr,"sdl3: SDL_SetRenderDrawColor failed (%s)\n", SDL_GetError());
+		return (1);
+	}
+
+	/* we definitely don't want to have vertical sync */
 	if (SDL_SetRenderVSync(sdl->render,SDL_RENDERER_VSYNC_DISABLED)==0) {
 		fprintf (stderr,"sdl3: SDL_SetRenderVSync failed (%s)\n",SDL_GetError());
 	}
 
 	/* this would print out some information about the installed video and render drivers, but
 	   we don't call it to not spam a lot of mostly useless stuff to the console ″*/
-	/* sdl3_print_info(sdl); */
+	sdl3_print_info(sdl);
 
 	return (0);
 }
@@ -860,9 +931,14 @@ int sdl3_close (sdl3_t *sdl)
 {
 	sdl3_grab_mouse (sdl, 0);
 
-	if (sdl->texture != NULL) {
-		SDL_DestroyTexture (sdl->texture);
-		sdl->texture = NULL;
+	if (sdl->texture[0] != NULL) {
+		SDL_DestroyTexture (sdl->texture[0]);
+		sdl->texture[0] = NULL;
+	}
+
+	if (sdl->texture[1] != NULL) {
+		SDL_DestroyTexture (sdl->texture[1]);
+		sdl->texture[1] = NULL;
 	}
 
 	if (sdl->render != NULL) {
@@ -895,7 +971,9 @@ void sdl3_init (sdl3_t *sdl, ini_sct_t *sct)
 
 	sdl->window = NULL;
 	sdl->render = NULL;
-	sdl->texture = NULL;
+	sdl->texture[0] = NULL;
+	sdl->texture[1] = NULL;
+	sdl->texture_index = 0;
 
 	sdl->txt_w = 0;
 	sdl->txt_h = 0;

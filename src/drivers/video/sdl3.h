@@ -47,7 +47,8 @@ typedef struct {
 
 	SDL_Window    *window;
 	SDL_Renderer  *render;
-	SDL_Texture   *texture;
+	SDL_Texture   *texture[2];
+	unsigned      texture_index;
 
 	SDL_FRect     framebuffer_render_rect;
 	SDL_ScaleMode framebuffer_scale_mode;
