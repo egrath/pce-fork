@@ -24,6 +24,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/time.h>
 
 #include <SDL.h>
 
@@ -194,15 +195,15 @@ void sdl3_print_info (sdl3_t *sdl)
 		fprintf (stdout,"sdl3:     %s %s\n",SDL_GetRenderDriver(i),strcmp(SDL_GetRendererName(sdl->render),SDL_GetRenderDriver(i))==0 ? "(CURRENT)" : "" );
 
 #if SDL_VERSION_ATLEAST(3,4,0)
-	/* check if our gpu/renderer supports the RGB24 texture format */
+	/* check if our gpu/renderer supports the XRGB8888 texture format */
 	if ((gpuDevice = SDL_GetGPURendererDevice (sdl->render)) == NULL) {
 		fprintf (stdout,"sdl3: WARNING, not using a GPU accelerated renderer (%s)\n", SDL_GetError());
 	} else {
-		format = SDL_GetGPUTextureFormatFromPixelFormat (SDL_PIXELFORMAT_RGB24);
+		format = SDL_GetGPUTextureFormatFromPixelFormat (SDL_PIXELFORMAT_XRGB8888);
 		if (SDL_GPUTextureSupportsFormat (gpuDevice, format, SDL_GPU_TEXTURETYPE_2D, 0) == 0) {
-			fprintf (stdout, "sdl3: WARNING, GPU does not support the RGB24 texture, may be slower!\n");
+			fprintf (stdout, "sdl3: WARNING, GPU does not support the XRGB8888 texture, may be slower!\n");
 		} else {
-			fprintf (stdout, "sdl3: RGB24 texture is hardware-accelerated\n");
+			fprintf (stdout, "sdl3: XRGB8888 texture is hardware-accelerated\n");
 		}
 	}
 #endif
@@ -387,41 +388,26 @@ int sdl3_set_frame_size (sdl3_t *sdl)
 		return (0);
 	}
 
-	if (sdl->texture[0] != NULL) {
-		SDL_DestroyTexture (sdl->texture[0]);
-		sdl->texture[0] = NULL;
+	if (sdl->texture != NULL) {
+		SDL_DestroyTexture (sdl->texture);
+		sdl->texture = NULL;
 	}
 
-	if (sdl->texture[1] != NULL) {
-		SDL_DestroyTexture (sdl->texture[1]);
-		sdl->texture[1] = NULL;
-	}
-
-	/* create the two textures we need for double buffering our output. We do
-	   this to not stall the rendering pipeline with our fast updates */
-	sdl->texture_index = 0;
-	sdl->texture[0] = SDL_CreateTexture (sdl->render,
-		SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING,
+	/* create the target texture used for displaying the framebuffer */
+	sdl->texture = SDL_CreateTexture (sdl->render,
+		SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING,
 		terminal_width,
 		terminal_height
 	);
-	sdl->texture[1] = SDL_CreateTexture (sdl->render,
-		SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING,
-		terminal_width,
-		terminal_height
-	);
-	if (sdl->texture[0] == NULL || sdl->texture[1] == NULL) {
+
+	if (sdl->texture == NULL) {
 		fprintf (stderr, "sdl3: SDL_CreateTexture failed (%s)\n",SDL_GetError());
 		return (1);
 	}
 
 	/* set the scaling mode for the textures according to what the user has 
 	   specified in the configuration file */
-	if (SDL_SetTextureScaleMode(sdl->texture[0],sdl->framebuffer_scale_mode) == 0) {
-		fprintf (stderr,"sdl3: SDL_SetTextureScaleMode failed (%s)\n",SDL_GetError());
-	}
-
-	if (SDL_SetTextureScaleMode(sdl->texture[1],sdl->framebuffer_scale_mode) == 0) {
+	if (SDL_SetTextureScaleMode(sdl->texture,sdl->framebuffer_scale_mode) == 0) {
 		fprintf (stderr,"sdl3: SDL_SetTextureScaleMode failed (%s)\n",SDL_GetError());
 	}
 
@@ -448,12 +434,13 @@ unsigned sdl3_map_key (sdl3_t *sdl, SDL_Scancode key)
 static
 void sdl3_update(sdl3_t *sdl)
 {
-	terminal_t *trm;
-	void       *texturePixels;
-	void       *framebufferPixels;
-	int        texturePitch;
-	unsigned   framebufferLine;
-	SDL_FRect  dest_rect;
+	terminal_t          *trm;
+	void                *texturePixels;
+	int                 texturePitch;
+	unsigned            framebufferLine;
+	unsigned            framebufferColumn;
+	unsigned int        *destinationPixel;
+	const unsigned char *sourcePixel;
 
 	trm = &sdl->trm;
 
@@ -472,7 +459,7 @@ void sdl3_update(sdl3_t *sdl)
 		return;
 	}
 
-	if ((sdl->texture[0] == NULL) || (sdl->texture[1] == NULL) || (sdl->render == NULL)) {
+	if (sdl->texture == NULL || (sdl->render == NULL)) {
 		return;
 	}
 
@@ -480,25 +467,34 @@ void sdl3_update(sdl3_t *sdl)
 	sdl3_update_framebuffer_render_rect (sdl);
 
 	/* copy the pixels from our emulated buffer to the texture (one of two)
-	   for displaying.
-
-		Formerly we used the approach of simply updating the texture
-		with SDL's "SDL_UpdateTexture" function, but it seems that some
-		graphics drivers - especially on Windows - do not perform very
-		well with this approach as we use a RGB24 texture. */
-	if (SDL_LockTexture (sdl->texture[sdl->texture_index], NULL, &texturePixels, &texturePitch) == 0) {
+	   for displaying. */
+	if (SDL_LockTexture (sdl->texture, NULL, &texturePixels, &texturePitch) == 0) {
 		fprintf (stderr, "sdl3: SDL_LockTexture failed (%s)\n", SDL_GetError());
 		return;
 	}
 
-	framebufferPixels = (void *) trm->buf;
+	sourcePixel = (const unsigned char *) trm->buf;
 	for (framebufferLine = 0; framebufferLine < trm->h; framebufferLine ++) {
-		memcpy (texturePixels, framebufferPixels, trm->w * 3);
-		framebufferPixels += trm->w * 3;
-		texturePixels += texturePitch;
+		destinationPixel = (unsigned int *) texturePixels; /* one pixel is 4 bytes */
+
+		for (framebufferColumn = 0; framebufferColumn < trm->w; framebufferColumn ++) {
+			/* build the target pixel in XRGB8888 format from the source. Target format is
+			   XXXXXXXX RRRRRRRR GGGGGGGG BBBBBBBB. We don't need to specifiy the most
+		      significant byte as it's 0 by default.*/
+			destinationPixel[framebufferColumn] = 
+				((unsigned int) sourcePixel[0] << 16) |
+				((unsigned int) sourcePixel[1] << 8)  |
+				((unsigned int) sourcePixel[2]);
+			sourcePixel += 3; /* because we have RGB data with 1 byte per color */
+		}
+
+		/* move pointer forward to the next line. We have to cast texturePixels 
+		   to a 1 byte data type to perform this pointer arithmetic as texturePitch
+			is measured in bytes */
+		texturePixels = (unsigned char *) texturePixels + texturePitch;
 	}
 
-	SDL_UnlockTexture (sdl->texture[sdl->texture_index]);
+	SDL_UnlockTexture (sdl->texture);
 
 	/* Clear the renderer with black color (needed for the letterbox)*/
 	if (SDL_RenderClear (sdl->render)==0) {
@@ -507,7 +503,7 @@ void sdl3_update(sdl3_t *sdl)
 	}
 
 	/* Render the texture with correct aspect ratio */
-	if (SDL_RenderTexture (sdl->render, sdl->texture[sdl->texture_index], NULL, &(sdl->framebuffer_render_rect))==0) {
+	if (SDL_RenderTexture (sdl->render, sdl->texture, NULL, &(sdl->framebuffer_render_rect))==0) {
 		fprintf (stderr,"sdl3: SDL_RenderTexture failed (%s)\n", SDL_GetError());
 		return;
 	}
@@ -516,9 +512,6 @@ void sdl3_update(sdl3_t *sdl)
 		fprintf (stderr,"sdl3: SDL_RenderPresent failed (%s)\n", SDL_GetError());
 		return;
 	}
-
-	/* toggle texture_index between 0 and 1 and vica versa */
-	sdl->texture_index ^= 1;
 }
 
 static
@@ -859,9 +852,7 @@ int sdl3_open (sdl3_t *sdl, unsigned w, unsigned h)
 
 	sdl->window = NULL;
 	sdl->render = NULL;
-	sdl->texture[0] = NULL;
-	sdl->texture[1] = NULL;
-	sdl->texture_index = 0;
+	sdl->texture = NULL;
 
 	/* create the window */
 	flags = SDL_WINDOW_RESIZABLE;
@@ -931,14 +922,9 @@ int sdl3_close (sdl3_t *sdl)
 {
 	sdl3_grab_mouse (sdl, 0);
 
-	if (sdl->texture[0] != NULL) {
-		SDL_DestroyTexture (sdl->texture[0]);
-		sdl->texture[0] = NULL;
-	}
-
-	if (sdl->texture[1] != NULL) {
-		SDL_DestroyTexture (sdl->texture[1]);
-		sdl->texture[1] = NULL;
+	if (sdl->texture != NULL) {
+		SDL_DestroyTexture (sdl->texture);
+		sdl->texture = NULL;
 	}
 
 	if (sdl->render != NULL) {
@@ -971,9 +957,7 @@ void sdl3_init (sdl3_t *sdl, ini_sct_t *sct)
 
 	sdl->window = NULL;
 	sdl->render = NULL;
-	sdl->texture[0] = NULL;
-	sdl->texture[1] = NULL;
-	sdl->texture_index = 0;
+	sdl->texture = NULL;
 
 	sdl->txt_w = 0;
 	sdl->txt_h = 0;
